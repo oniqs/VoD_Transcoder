@@ -1,0 +1,178 @@
+#!/bin/bash
+export PATH=$PATH:/home/noc/bin	####to make script global
+########Input/Output Paths######################################################################################################################################
+
+	read -p $'\nSpecify Full path for input <file> or <directory>, e.g./mnt/nas-lab/OASYS_INPUT/A2.0_2L/NBCU/2017/Smokin_Aces_UA_EN.MXF(<file>), /mnt/nas2-lab/BACKUP/Disney/Quantico/Season2(<directory>):\n>>> ' -e inPath
+	while [[ ! -d "$inPath" && ! -f "$inPath" ]] ; do
+		read -p $'Incorrect name, try again:\n>>> ' -e inPath
+	done
+
+	outDir='/mnt/nas3-lab/NOC/WorkinProgress'
+
+########Bitrates`n Stuff################################################################
+
+	vid1bps='5500'
+	vid2bps='3500'
+	vid3bps='2000'
+	vid4bps='1000'
+	audbps='128'
+
+	mailTo="playout@volia.com"
+	mailFrom="tc-204-HD@ott.volia.net"
+
+#	time='-t 00:05:00'		####!Comment this line to process full duration!
+
+########Audio languages selection###############################################################################################################################
+
+	read -p $'\nSpecify audio layout:\n    1. A*_1L      (1 audio track (2.0 or 5.1), 1 lang)\n    2. A2.0_1L    (2 mono, 1 lang)\n    3. A5.1_C3_1L (6 mono, 1 lang)\n    4. A*_2L      (2 audio tracks (2.0+2.0 or 5.1+2.0), 2 lang)\n    5. A2.0_2L    (4 mono, 2 lang)\n    6. A5.1_C3_2L (8 mono, 2 lang)\n    7. A*_3L      (3 audio tracks, 3 lang)\n>>> ' -e audLyt
+	while [[ ! $audLyt =~ ^[1-7]$ ]] ; do
+		read -p $'Incorrect number, try again:\n>>> ' -e audLyt
+	done
+
+	if [[ $audLyt =~ ^[123]$ ]] ; then
+		read -p $'\nSpecify audio language (ISO 3166, Alpha-3 code)\n>>> ' -e audLangDesc1
+	else
+		read -p $'\nSpecify 1st audio language\n>>> ' -e audLangDesc1
+		read -p $'Specify 2nd audio language\n>>> ' -e audLangDesc2
+		if [[ $audLyt == "7" ]] ; then
+			read -p $'Specify 3d audio language\n>>> ' -e audLangDesc3
+		fi
+	fi
+
+########File-OR-Directory#######################################################################################################################################
+
+	if [[ -f "$inPath" ]] ; then 
+#		echo "is file"
+		assName="${inPath##*/}"
+		assName="${assName%.*}"
+		read -p $'\nEdit asset name:\n--> ' -i "$assName" -e assName
+		toBeDone=$inPath
+	else
+#		echo "is directory"
+		read -p $'\nSpecify assets\' naming up to season number(optional) for TV-series and episode number if needed(optional) as like: <asset_name>[_S<season_number>][#], Greys_Anatomy_S12#, Quantico_S2 ..:\n    Skip (ENTER) for "literal" naming (input name = output name) \n>>> ' -e cstAssName
+		i=1
+		shopt -s nullglob		####removes the "*" from toBeDone
+		cd "$inPath"
+		toBeDone=(*.mp4 *.MP4 *.MOV *.mov *.mxf *.MXF *.ts *.TS *.mkv *.MKV *.mpg *.MPG *.mpeg *.MPEG *.avi *.AVI *.dv *DV)
+	fi
+
+	echo $'Job\'s done! Assets prepared:\n' > /var/log/HD4VoD.txt
+
+########For each file in watchfolder(file or dir) LOOP START#################################################################################################################
+
+	for f in "${toBeDone[@]}" ; do
+
+		if [[ -f "$inPath" ]] ; then							####Is a file
+			true
+		elif [[ -n "$cstAssName" ]] ; then						####with custom naming
+			if [[ $cstAssName = *"#"* ]] ; then  					####HAS episodes
+				assName=$(echo "${cstAssName//#/E$(printf "%03d\n" $i)}")	####if HAS "#" sign - 3-digit episode counter substites it
+			else
+				assName=${cstAssName}_E$(printf "%03d\n" $i)			####if NO "#" sign - episode counter at the end
+			fi
+			(( i++ ))
+		else
+			assName=${f%.*}								####source file`s name (without extension)			
+		fi
+
+		outPath="$outDir/$assName/$assName"
+		mkdir -p "$outDir/$assName"							####!must have root for this
+
+################Audio Layout####################################################################################################################################
+
+		if [[ $audLyt =~ ^[123]$ ]] ; then						####ONE audio track
+			audMapSec=''
+			spc=''
+			audFragSec=true
+			audMvSec=true
+			audFileSec=''
+			if [ $audLyt == "1" ] ; then
+				audOpts="[0:1]acopy[aoutDef]"
+			elif [ $audLyt == "2" ] ; then
+				audOpts="[0:7][0:8]amerge=inputs=2[aoutDef]"
+			else 
+				audOpts="[0:1][0:2][0:3][0:4][0:5][0:6]amerge=inputs=6[aoutDef]"
+			fi
+		else										####TWO audio tracks
+			audMapSec=(-map "[aoutSec]" -disposition:a:1 0 -metadata:s:a:1 language=${audLangDesc2})
+			spc=' '
+			audFragSec=(mp4fragment --timescale 10000000 --fragment-duration 1984 --track 2 "${outPath}_A_${audbps}.isma" "${outPath}_A2_${audbps}_reF.isma")
+			audMvSec=(mv -f "${outPath}_A2_${audbps}_reF.isma" "${outPath}_A2_${audbps}.isma")
+			audFileSec=${spc}"${outPath}_A2_${audbps}.isma"
+			if [ $audLyt == "4" ] ; then
+				audOpts="[0:1]acopy[aoutDef];[0:2]acopy[aoutSec]"
+			elif [ $audLyt == "5" ] ; then
+				audOpts="[0:1][0:2]amerge=inputs=2[aoutDef];[0:3][0:4]amerge=inputs=2[aoutSec]"
+			elif [ $audLyt == "6" ] ; then
+				audOpts="[0:1][0:2][0:3][0:4][0:5][0:6]amerge=inputs=6[aoutDef];[0:7][0:8]amerge=inputs=2[aoutSec]"
+			else									####THREE audio languages
+				audMapTri=(-map "[aoutTri]" -disposition:a:2 0 -metadata:s:a:2 language=${audLangDesc3})
+				audFragTri=(mp4fragment --timescale 10000000 --fragment-duration 1984 --track 3 "${outPath}_A_${audbps}.isma" "${outPath}_A3_${audbps}_reF.isma")
+				audMvTri=(mv -f "${outPath}_A3_${audbps}_reF.isma" "${outPath}_A3_${audbps}.isma")
+				audFileSec=${spc}"${outPath}_A2_${audbps}.isma"${spc}"${outPath}_A3_${audbps}.isma"
+				audOpts="[0:1]acopy[aoutDef];[0:2]acopy[aoutSec];[0:3]acopy[aoutTri]"
+			fi
+		fi
+
+################ffmpeg Transcoding##############################################################################################################################
+
+		echo $'\n|<- Processing.. '$assName
+		echo ""
+
+		ffmpeg -i "$f" \
+		\
+		-map 0:v -c:v libx264 -profile:v high -preset medium -x264-params "nal-hrd=cbr:force-cfr=1" -b:v ${vid1bps}K -minrate ${vid1bps}K -maxrate ${vid1bps}K -bufsize $((2*$vid1bps))K -s 1920:1080 -aspect 16:9 -coder 1 -bf -1 -refs 4 -pix_fmt yuv420p -g 50 -keyint_min 50 -sc_threshold 0 -movflags frag_keyframe $time -y "${outPath}_V1_${vid1bps}.ismv" \
+		\
+		-map 0:v -c:v libx264 -profile:v high -preset medium -x264-params "nal-hrd=cbr:force-cfr=1" -b:v ${vid2bps}K -minrate ${vid2bps}K -maxrate ${vid2bps}K -bufsize $((2*$vid2bps))K -s 1920:1080 -aspect 16:9 -coder 1 -bf -1 -refs 4 -pix_fmt yuv420p -g 50 -keyint_min 50 -sc_threshold 0 -movflags frag_keyframe $time -y "${outPath}_V2_${vid2bps}.ismv" \
+		\
+		-map 0:v -c:v libx264 -profile:v main -preset medium -x264-params "nal-hrd=cbr:force-cfr=1" -b:v ${vid3bps}K -minrate ${vid3bps}K -maxrate ${vid3bps}K -bufsize $((2*$vid3bps))K -s 1280:720 -aspect 16:9 -coder 1 -bf -1 -refs 4 -pix_fmt yuv420p -g 50 -keyint_min 50 -sc_threshold 0 -movflags frag_keyframe $time -y "${outPath}_V3_${vid3bps}.ismv" \
+		\
+		-map 0:v -c:v libx264 -profile:v main -preset medium -x264-params "nal-hrd=cbr:force-cfr=1" -b:v ${vid4bps}K -minrate ${vid4bps}K -maxrate ${vid4bps}K -bufsize $((2*$vid4bps))K -s 1024:576 -aspect 16:9 -coder 1 -bf -1 -refs 4 -pix_fmt yuv420p -g 50 -keyint_min 50 -sc_threshold 0 -movflags frag_keyframe $time -y "${outPath}_V4_${vid4bps}.ismv" \
+		\
+		-filter_complex "$audOpts" \
+		-map "[aoutDef]" -c:a libfdk_aac -b:a ${audbps}K -ac 2 -ar 48K -disposition:a:0 default -metadata:s:a:0 language=${audLangDesc1}${spc}"${audMapSec[@]}"${spc}"${audMapTri[@]}" \
+		$time -y "${outPath}_A_${audbps}.isma"
+
+################bento4 Fragmentation############################################################################################################################
+
+		mp4fragment --timescale 10000000 --fragment-duration 2000 "${outPath}_V1_${vid1bps}.ismv" "${outPath}_V1_${vid1bps}_reF.ismv"
+		mp4fragment --timescale 10000000 --fragment-duration 2000 "${outPath}_V2_${vid2bps}.ismv" "${outPath}_V2_${vid2bps}_reF.ismv"
+		mp4fragment --timescale 10000000 --fragment-duration 2000 "${outPath}_V3_${vid3bps}.ismv" "${outPath}_V3_${vid3bps}_reF.ismv"
+		mp4fragment --timescale 10000000 --fragment-duration 2000 "${outPath}_V4_${vid4bps}.ismv" "${outPath}_V4_${vid4bps}_reF.ismv"
+		mp4fragment --timescale 10000000 --fragment-duration 1984 --track 1 "${outPath}_A_${audbps}.isma" "${outPath}_A1_${audbps}_reF.isma"
+		"${audFragSec[@]}"
+		"${audFragTri[@]}"
+
+################Clean up########################################################################################################################################
+
+		mv -f "${outPath}_V1_${vid1bps}_reF.ismv" "${outPath}_V1_${vid1bps}.ismv"
+		mv -f "${outPath}_V2_${vid2bps}_reF.ismv" "${outPath}_V2_${vid2bps}.ismv"
+		mv -f "${outPath}_V3_${vid3bps}_reF.ismv" "${outPath}_V3_${vid3bps}.ismv"
+		mv -f "${outPath}_V4_${vid4bps}_reF.ismv" "${outPath}_V4_${vid4bps}.ismv"
+		mv -f "${outPath}_A1_${audbps}_reF.isma" "${outPath}_A1_${audbps}.isma"
+		"${audMvSec[@]}"
+		"${audMvTri[@]}"
+		rm -rf "${outPath}_A_${audbps}.isma"
+
+################Creating Smooth Streaming manifests#############################################################################################################
+
+		ismindex -n "$outPath" \
+		"${outPath}_V1_${vid1bps}.ismv" "${outPath}_V2_${vid2bps}.ismv" "${outPath}_V3_${vid3bps}.ismv" "${outPath}_V4_${vid4bps}.ismv" \
+		"${outPath}_A1_${audbps}.isma"${audFileSec}
+
+################Finalizing######################################################################################################################################
+
+		echo $'\n->| Completed!   '$assName
+		echo "_へ__(‾◡◝ )>"
+
+		echo "$assName" >> /var/log/HD4VoD.txt
+		
+	done	############For each file in watchfolder LOOP END
+
+	myDate=$(echo $(date  "+%T | %d.%m.%y"))
+	mail -s "VoD transcoding complete @ $myDate" -r "$mailFrom" "$mailTo" < /var/log/HD4VoD.txt
+
+	echo ""
+
+################  (C) 2018 Andriy Onischuk, DIP, "Volia"########################################################################################################
+
